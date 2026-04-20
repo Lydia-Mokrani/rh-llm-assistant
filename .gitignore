@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Environnement virtuel
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+Untitled*.ipynb
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Dataset (fichiers volumineux)
+dataset/raw/
+dataset/processed/
+*.csv
+*.jsonl
+
+# Fichiers de logs
+*.log
+*.DS_Store
+Thumbs.db
+
+# Modèles (volumineux)
+model/
+*.bin
+*.pt
+*.pth
+
+# Fichiers temporaires
+*.tmp
+*.bak
+*.swp
