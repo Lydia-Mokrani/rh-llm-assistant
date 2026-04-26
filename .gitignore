@@ -45,3 +45,8 @@ Thumbs.db
 *.tmp
 *.bak
 *.swp
+optimizer.pt
+scaler.pt
+scheduler.pt
+rng_state.pth
+training_args.bin
