@@ -37,7 +37,6 @@ dataset/processed/
 Thumbs.db
 
 # Modèles (volumineux)
-model/
 *.bin
 *.pt
 *.pth
