@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>HR CV Analyzer</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #F7F5F0; --surface: #FFFFFF; --surface2: #F0EDE6; --border: #E2DDD5;
+    --text: #1A1816; --muted: #7A756E; --accent: #1D4E35; --accent-light: #E8F2EC;
+    --warn: #8B3A1A; --warn-light: #FBF0EB;
+    --score-high: #1D4E35; --score-mid: #8B6B1A; --score-low: #8B3A1A;
+    --radius: 12px; --radius-sm: 8px;
+  }
+  body { font-family: "DM Sans", sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 15px; line-height: 1.6; }
+  header { background: var(--text); color: #F7F5F0; padding: 1.25rem 2rem; display: flex; align-items: center; justify-content: space-between; }
+  .logo { font-family: "DM Serif Display", serif; font-size: 1.4rem; letter-spacing: -0.02em; }
+  .logo span { color: #8BC4A4; }
+  #mode-badge { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; padding: 4px 10px; border-radius: 100px; background: #2e2b28; color: #9E9891; }
+  #mode-badge.real { background: #1D4E35; color: #8BC4A4; }
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .status-bar { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 1.25rem; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; flex-shrink: 0; }
+  .status-dot.ok  { background: var(--score-high); }
+  .status-dot.err { background: var(--warn); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+  @media(max-width:680px){ .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; }
+  .card h2 { font-family: "DM Serif Display", serif; font-size: 1.05rem; margin-bottom: 0.75rem; }
+  .drop-zone { border: 1.5px dashed var(--border); border-radius: var(--radius-sm); padding: 2rem 1rem; text-align: center; cursor: pointer; transition: background 0.2s, border-color 0.2s; position: relative; }
+  .drop-zone.over, .drop-zone:hover { background: var(--surface2); border-color: var(--accent); }
+  .drop-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .drop-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+  .drop-label { font-size: 13px; color: var(--muted); }
+  .drop-label strong { color: var(--accent); }
+  #file-name { margin-top: 0.6rem; font-size: 12px; color: var(--muted); font-style: italic; }
+  textarea { width: 100%; height: 148px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-family: "DM Sans", sans-serif; font-size: 13px; color: var(--text); resize: vertical; outline: none; }
+  textarea:focus { border-color: var(--accent); }
+  .btn-analyze { width: 100%; margin-top: 1.25rem; background: var(--accent); color: #fff; border: none; border-radius: var(--radius-sm); padding: 13px; font-family: "DM Serif Display", serif; font-size: 1rem; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: opacity 0.2s; }
+  .btn-analyze:hover { opacity: 0.88; }
+  .btn-analyze:disabled { opacity: 0.45; cursor: not-allowed; }
+  .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #results { margin-top: 1.5rem; display: none; }
+
+  /* Score card */
+  .score-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; display: flex; align-items: center; gap: 1.5rem; margin-bottom: 1.25rem; }
+  .score-circle { width: 88px; height: 88px; border-radius: 50%; border: 3px solid; display: flex; align-items: center; justify-content: center; font-family: "DM Serif Display", serif; font-size: 1.5rem; flex-shrink: 0; }
+  .score-circle.high { border-color: var(--score-high); color: var(--score-high); }
+  .score-circle.mid  { border-color: var(--score-mid);  color: var(--score-mid); }
+  .score-circle.low  { border-color: var(--score-low);  color: var(--score-low); }
+  .verdict-text h3 { font-size: 1.05rem; font-weight: 600; margin-bottom: 4px; }
+  .verdict-text .meta { font-size: 12px; color: var(--muted); }
+
+  /* Strengths / Weaknesses */
+  .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.25rem; }
+  @media(max-width:560px){ .results-grid { grid-template-columns: 1fr; } }
+  .result-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
+  .result-section h4 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.75rem; }
+  .result-section.strengths h4 { color: var(--score-high); }
+  .result-section.weaknesses h4 { color: var(--warn); }
+  .result-section ul { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .result-section li { font-size: 13px; color: var(--text); background: var(--surface2); border-radius: 6px; padding: 7px 10px; display: flex; align-items: flex-start; gap: 7px; line-height: 1.45; }
+  .result-section.strengths li::before { content: "✓"; color: var(--score-high); font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+  .result-section.weaknesses li::before { content: "!"; color: var(--warn); font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+
+  /* Chat */
+  #chat-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .chat-header { padding: 0.85rem 1.25rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .chat-header h4 { font-size: 13px; font-weight: 600; }
+  .chat-header span { font-size: 11px; color: var(--muted); }
+  #chat-messages { padding: 1rem; max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 86%; display: flex; flex-direction: column; gap: 3px; }
+  .msg.user { align-self: flex-end; }
+  .msg.bot  { align-self: flex-start; }
+  .msg-label { font-size: 10px; color: var(--muted); padding: 0 3px; }
+  .msg.user .msg-label { text-align: right; }
+  .bubble { padding: 9px 13px; border-radius: 12px; font-size: 13px; line-height: 1.55; }
+  .msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .msg.bot  .bubble { background: var(--surface2); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+
+  /* Chat answer card */
+  .chat-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; border-bottom-left-radius: 3px; padding: 10px 13px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+  .chat-card-score { display: flex; align-items: center; gap: 8px; }
+  .badge { padding: 2px 10px; border-radius: 100px; font-size: 12px; font-weight: 700; }
+  .badge.high { background: var(--accent-light); color: var(--score-high); }
+  .badge.mid  { background: #FEF9E7; color: var(--score-mid); }
+  .badge.low  { background: var(--warn-light); color: var(--warn); }
+  .chat-card-verdict { font-weight: 500; color: var(--text); }
+  .chat-card-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; margin-top: 2px; }
+  .chat-card-section-title.s { color: var(--score-high); }
+  .chat-card-section-title.w { color: var(--warn); }
+  .chat-card-items { display: flex; flex-direction: column; gap: 3px; }
+  .chat-card-item { font-size: 12px; color: var(--muted); display: flex; gap: 5px; }
+  .chat-card-item.s::before { content: "✓"; color: var(--score-high); font-weight: 700; flex-shrink: 0; }
+  .chat-card-item.w::before { content: "!"; color: var(--warn); font-weight: 700; flex-shrink: 0; }
+
+  /* plain text bot answer (for follow-up summaries) */
+  .chat-answer { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; border-bottom-left-radius: 3px; padding: 10px 13px; font-size: 13px; line-height: 1.6; color: var(--text); }
+
+  /* Typing */
+  .typing { display: flex; gap: 4px; align-items: center; padding: 9px 13px; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; border-bottom-left-radius: 3px; width: fit-content; }
+  .typing span { width: 6px; height: 6px; background: var(--muted); border-radius: 50%; animation: bounce 1.2s infinite; }
+  .typing span:nth-child(2){ animation-delay:.2s; }
+  .typing span:nth-child(3){ animation-delay:.4s; }
+  @keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-6px)} }
+
+  .alert { padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 0.75rem; }
+  .alert.error { background: var(--warn-light); color: var(--warn); border: 1px solid #f5c4b3; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">HR<span>.</span>Analyze</div>
+  <div id="mode-badge">Connecting...</div>
+</header>
+<div class="container">
+  <div class="status-bar">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="status-msg">Connecting to API...</span>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h2>CV Upload</h2>
+      <div class="drop-zone" id="drop-zone">
+        <input type="file" id="cv-file" accept=".pdf"/>
+        <div class="drop-icon">📄</div>
+        <div class="drop-label">Drop PDF here or <strong>browse</strong></div>
+        <div id="file-name">No file selected</div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Job Description</h2>
+      <textarea id="job-desc" placeholder="Paste the job description here..."></textarea>
+    </div>
+  </div>
+  <div id="error-msg"></div>
+  <button class="btn-analyze" id="analyze-btn" onclick="analyze()">
+    <div class="spinner" id="spinner"></div>
+    <span id="btn-text">Analyze CV</span>
+  </button>
+  <div id="results">
+    <div class="score-card">
+      <div class="score-circle" id="score-circle">—</div>
+      <div class="verdict-text">
+        <h3 id="verdict-title">—</h3>
+        <div class="meta" id="verdict-meta"></div>
+      </div>
+    </div>
+    <div class="results-grid">
+      <div class="result-section strengths"><h4>✓ Strengths</h4><ul id="strengths-list"></ul></div>
+      <div class="result-section weaknesses"><h4>! Weaknesses</h4><ul id="weaknesses-list"></ul></div>
+    </div>
+    <div id="chat-section">
+      <div class="chat-header">
+        <h4>💬 Ask about this candidate</h4>
+        <span id="chat-context-label"></span>
+      </div>
+      <div id="chat-messages"></div>
+      <div id="chat-form" style="display:flex;border-top:1px solid var(--border)">
+        <input type="text" id="chat-input" style="flex:1;border:none;background:transparent;padding:11px 14px;font-family:DM Sans,sans-serif;font-size:13px;color:var(--text);outline:none" placeholder="e.g. What should this candidate improve?"/>
+        <button onclick="sendChat()" style="background:var(--accent);color:#fff;border:none;padding:0 18px;cursor:pointer;font-size:18px;">↑</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  // ── State — everything the chat needs lives here ──────
+  let lastAnalysis = null;   // full API response object
+  let lastJob = "";
+
+  window.addEventListener("load", checkHealth);
+
+  async function checkHealth() {
+    const dot = document.getElementById("status-dot");
+    const msg = document.getElementById("status-msg");
+    try {
+      const res = await fetch("/health");
+      const data = await res.json();
+      dot.className = "status-dot ok";
+      msg.textContent = "Connected · " + (data.mode === "real" ? "Real Model active" : "Mock Mode active");
+      const badge = document.getElementById("mode-badge");
+      badge.textContent = data.mode === "real" ? "Real Model" : "Mock Mode";
+      if (data.mode === "real") badge.className = "real";
+    } catch(e) {
+      dot.className = "status-dot err";
+      msg.textContent = "API unreachable";
+    }
+  }
+
+  // ── Drop zone ────────────────────────────────────────
+  const dz = document.getElementById("drop-zone");
+  const fi = document.getElementById("cv-file");
+  dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("over"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("over"));
+  dz.addEventListener("drop", e => {
+    e.preventDefault(); dz.classList.remove("over");
+    if (e.dataTransfer.files[0]) { fi.files = e.dataTransfer.files; updateFileName(); }
+  });
+  fi.addEventListener("change", updateFileName);
+  function updateFileName() {
+    document.getElementById("file-name").textContent = fi.files[0]?.name || "No file selected";
+  }
+
+  // ── Analyze ──────────────────────────────────────────
+  async function analyze() {
+    const file = fi.files[0];
+    const job  = document.getElementById("job-desc").value.trim();
+    if (!file) { showError("Please upload a CV PDF."); return; }
+    if (!job)  { showError("Please enter a job description."); return; }
+    setLoading(true); clearError();
+    try {
+      const form = new FormData();
+      form.append("cv_pdf", file);
+      form.append("job_description", job);
+      const res = await fetch("/analyze/pdf", { method: "POST", body: form });
+      if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.detail || "HTTP " + res.status); }
+      const data = await res.json();
+      lastAnalysis = data;          // ← store the FULL response
+      lastJob = job;
+      renderResults(data);
+    } catch(e) { showError("Analysis failed: " + e.message); }
+    finally { setLoading(false); }
+  }
+
+  // ── Render main results ──────────────────────────────
+  function renderResults(d) {
+    const pct = parseInt(d.score) || 0;
+    const circle = document.getElementById("score-circle");
+    circle.textContent = d.score;
+    circle.className = "score-circle " + cls(pct);
+    document.getElementById("verdict-title").textContent = d.verdict;
+    document.getElementById("verdict-meta").textContent =
+      "Extraction: " + d.extraction_method + "  ·  Score: " + d.score;
+    renderList("strengths-list",  d.strengths);
+    renderList("weaknesses-list", d.weaknesses);
+    document.getElementById("results").style.display = "block";
+    document.getElementById("results").scrollIntoView({ behavior: "smooth" });
+
+    // Seed chat with the analysis card
+    const box = document.getElementById("chat-messages");
+    box.innerHTML = "";
+    document.getElementById("chat-context-label").textContent =
+      "Based on " + (fi.files[0]?.name || "the uploaded CV");
+    appendBotText(
+        "Analysis complete for " + (fi.files[0]?.name || "this CV") + "\n\n" +
+        "Score: " + d.score + "  —  " + d.verdict + "\n\n" +
+        "You can ask me:\n" +
+        "• What are the candidate\'s strengths?\n" +
+        "• What is missing from the CV?\n" +
+        "• Should we invite them to interview?\n" +
+        "• What are the next steps?"
+      );
+  }
+
+  function renderList(id, items) {
+    const ul = document.getElementById(id);
+    ul.innerHTML = "";
+    (items || []).forEach(text => {
+      const li = document.createElement("li");
+      li.textContent = text;
+      ul.appendChild(li);
+    });
+  }
+
+  // ── Chat ─────────────────────────────────────────────
+  async function sendChat() {
+    const input = document.getElementById("chat-input");
+    const q = input.value.trim();
+    if (!q || !lastAnalysis) return;
+    input.value = "";
+    appendUserMsg(q);
+    showTyping();
+
+    // Build a rich text context from the stored analysis — no re-analysis needed
+    // We answer the question client-side using stored data for simple questions,
+    // and fall back to the API with the full context for complex ones.
+    const simpleAnswer = tryLocalAnswer(q, lastAnalysis);
+    if (simpleAnswer) {
+      removeTyping();
+      appendBotText(simpleAnswer);
+      return;
+    }
+
+    // For complex questions: send the full analysis as context to the API
+    try {
+      const context =
+        "CV Analysis Result:\n" +
+        "Score: " + lastAnalysis.score + "\n" +
+        "Verdict: " + lastAnalysis.verdict + "\n" +
+        "Strengths: " + lastAnalysis.strengths.join(", ") + "\n" +
+        "Weaknesses: " + lastAnalysis.weaknesses.join(", ") + "\n\n" +
+        "HR Question: " + q;
+      const res = await fetch("/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cv_text: context, job_description: lastJob })
+      });
+      removeTyping();
+      const data = await res.json();
+      appendBotCard(data);
+    } catch(e) {
+      removeTyping();
+      appendBotText("Could not reach the server. Is it still running?");
+    }
+  }
+
+  // Answer simple questions directly from stored analysis (no API call)
+  function tryLocalAnswer(q, d) {
+    const ql = q.toLowerCase();
+
+    // Summary / overview
+    if (/(summary|overview|overall|tell me|about|explain|analyse|analyze)/.test(ql)) {
+      return (
+        "Score: " + d.score + "  —  " + d.verdict + "\n\n" +
+        "Strengths:\n" + d.strengths.map(s => "✓ " + s).join("\n") + "\n\n" +
+        "Weaknesses / Gaps:\n" + d.weaknesses.map(w => "! " + w).join("\n")
+      );
+    }
+    // Strengths
+    if (/(strength|good at|excel|positive|match|qualif|fit|align|has|have)/.test(ql)) {
+      return "Here is what the candidate brings to the role:\n\n" +
+        d.strengths.map(s => "✓ " + s).join("\n");
+    }
+    // Weaknesses / improvements
+    if (/(weak|improv|missing|lack|gap|problem|bad|negativ|not have|doesn|without|need|should)/.test(ql)) {
+      return "Here is what is missing or needs improvement:\n\n" +
+        d.weaknesses.map(w => "! " + w).join("\n");
+    }
+    // Score
+    if (/(score|percent|rate|mark|point|number|how much|how well|result)/.test(ql)) {
+      return "The candidate scored " + d.score + ".\n" + d.verdict + ".";
+    }
+    // Hire decision
+    if (/(hire|recommend|interview|invite|accept|reject|decision|suitable|fit for|good for|pass|fail)/.test(ql)) {
+      const pct = parseInt(d.score) || 0;
+      if (pct >= 70) return "Yes — " + d.verdict + " (Score: " + d.score + ").\n\nKey reasons:\n" + d.strengths.map(s=>"✓ "+s).join("\n");
+      if (pct >= 45) return "Maybe — " + d.verdict + " (Score: " + d.score + ").\n\nGaps to consider:\n" + d.weaknesses.map(w=>"! "+w).join("\n");
+      return "No — " + d.verdict + " (Score: " + d.score + ").\n\nMain issues:\n" + d.weaknesses.map(w=>"! "+w).join("\n");
+    }
+    // Compare / next steps
+    if (/(next|step|now|do|action|plan|suggest|advise|what should)/.test(ql)) {
+      const pct = parseInt(d.score) || 0;
+      if (pct >= 70) return "Recommended next steps:\n✓ Schedule an interview\n✓ Verify the following strengths in person:\n" + d.strengths.map(s=>"  • "+s).join("\n");
+      if (pct >= 45) return "Recommended next steps:\n! Consider a screening call\n! Ask the candidate to address these gaps:\n" + d.weaknesses.map(w=>"  • "+w).join("\n");
+      return "Recommended next steps:\n! This candidate does not meet requirements\n! Key missing qualifications:\n" + d.weaknesses.map(w=>"  • "+w).join("\n");
+    }
+    return null;
+  }
+
+  document.getElementById("chat-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") sendChat();
+  });
+
+  // ── Chat renderers ───────────────────────────────────
+  function appendUserMsg(text) {
+    const box = document.getElementById("chat-messages");
+    const wrap = document.createElement("div");
+    wrap.className = "msg user";
+    wrap.innerHTML = `<div class="msg-label">You</div><div class="bubble">${esc(text)}</div>`;
+    box.appendChild(wrap); box.scrollTop = box.scrollHeight;
+  }
+
+  function appendBotText(text) {
+    const box = document.getElementById("chat-messages");
+    const wrap = document.createElement("div");
+    wrap.className = "msg bot";
+    // preserve newlines
+    const formatted = esc(text).replace(/\n/g, "<br>");
+    wrap.innerHTML = `<div class="msg-label">HR Assistant</div><div class="chat-answer">${formatted}</div>`;
+    box.appendChild(wrap); box.scrollTop = box.scrollHeight;
+  }
+
+  function appendBotCard(d, intro) {
+    const box = document.getElementById("chat-messages");
+    const pct = parseInt(d.score) || 0;
+    const c   = cls(pct);
+    let html  = `<div class="msg-label">HR Assistant</div><div class="chat-card">`;
+    if (intro) html += `<div style="font-size:12px;color:var(--muted);margin-bottom:2px">${esc(intro)}</div>`;
+    html += `<div class="chat-card-score">
+      <span class="badge ${c}">${esc(d.score)}</span>
+      <span class="chat-card-verdict">${esc(d.verdict)}</span>
+    </div>`;
+    if (d.strengths?.length) {
+      html += `<div class="chat-card-section-title s">Strengths</div><div class="chat-card-items">`;
+      d.strengths.forEach(s => { html += `<div class="chat-card-item s">${esc(s)}</div>`; });
+      html += `</div>`;
+    }
+    if (d.weaknesses?.length) {
+      html += `<div class="chat-card-section-title w">Weaknesses</div><div class="chat-card-items">`;
+      d.weaknesses.forEach(w => { html += `<div class="chat-card-item w">${esc(w)}</div>`; });
+      html += `</div>`;
+    }
+    html += `</div>`;
+    const wrap = document.createElement("div");
+    wrap.className = "msg bot";
+    wrap.innerHTML = html;
+    box.appendChild(wrap); box.scrollTop = box.scrollHeight;
+  }
+
+  function showTyping() {
+    const box = document.getElementById("chat-messages");
+    const div = document.createElement("div");
+    div.className = "msg bot"; div.id = "typing";
+    div.innerHTML = `<div class="msg-label">HR Assistant</div><div class="typing"><span></span><span></span><span></span></div>`;
+    box.appendChild(div); box.scrollTop = box.scrollHeight;
+  }
+  function removeTyping() { document.getElementById("typing")?.remove(); }
+
+  // ── Helpers ──────────────────────────────────────────
+  function cls(pct) { return pct >= 70 ? "high" : pct >= 45 ? "mid" : "low"; }
+  function esc(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+  function setLoading(on) {
+    document.getElementById("spinner").style.display = on ? "block" : "none";
+    document.getElementById("btn-text").textContent  = on ? "Analyzing..." : "Analyze CV";
+    document.getElementById("analyze-btn").disabled  = on;
+  }
+  function showError(msg) { document.getElementById("error-msg").innerHTML = `<div class="alert error">${msg}</div>`; }
+  function clearError()   { document.getElementById("error-msg").innerHTML = ""; }
+</script>
+</body>
+</html>
