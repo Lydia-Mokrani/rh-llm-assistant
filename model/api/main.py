@@ -578,10 +578,10 @@ def parse_output(raw: str, cv_text: str = "", job_description: str = "") -> dict
     #   WEAKNESSES / WEAKERESONS / WEAKERES:S / WEAKERSS  →  WEAK\w*\s*:
     #   VERDICT / VEREDICIT / VERNEDICIT     →  VER\w*\s*:
     kw = {
-        "score":      re.search(r'SCORE\s*:',   flat, re.IGNORECASE),
-        "strengths":  re.search(r'STREN\w+\s*:', flat, re.IGNORECASE),
-        "weaknesses": re.search(r'WEAK\w*\s*:',  flat, re.IGNORECASE),
-        "verdict":    re.search(r'VER[EI]\w*\s*:|VERDICT\s*:', flat, re.IGNORECASE),
+        "score":      re.search(r'SCORE\s*:+\s*',    flat, re.IGNORECASE),
+        "strengths":  re.search(r'STREN\w+\s*:+\s*', flat, re.IGNORECASE),
+        "weaknesses": re.search(r'WEAK\w*\s*:+\s*',  flat, re.IGNORECASE),
+        "verdict":    re.search(r'VER[EI]\w*\s*:+\s*|VERDICT\s*:+\s*', flat, re.IGNORECASE),
     }
 
     logger.info(f"Section positions — "
@@ -707,6 +707,8 @@ def _trim_item(text: str) -> str:
     4. Return empty string if result is too short to be meaningful
     """
     text = text.strip().lstrip("-•· \t")
+    # Strip lone letter + dash/space left by regex boundary artifacts e.g. "S -No mention"
+    text = re.sub(r'^[A-Z]\s*[-–]\s*', '', text).strip()
 
     # Cut at first full stop, exclamation, or question mark
     m = re.search(r'[.!?]', text)
@@ -789,10 +791,13 @@ def analyze_text(req: AnalyzeRequest):
 @app.post("/analyze/pdf", response_model=AnalyzeResponse)
 async def analyze_pdf(
     cv_pdf: UploadFile = File(...),
-    job_description: str = Form(default="Position not specified"),
+    job_description: str = Form(default=""),
 ):
     if not cv_pdf.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "File must be a PDF (.pdf)")
+    if not job_description.strip():
+        logger.warning("No job description provided — domain mismatch detection disabled")
+        job_description = "Position not specified"
     pdf_bytes = await cv_pdf.read()
     try:
         cv_text, method = smart_extract(pdf_bytes)
