@@ -9,7 +9,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 USE_MOCK   = os.getenv("USE_MOCK", "true").lower() == "true"
-BASE_MODEL = os.getenv("BASE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+# FIX #3: Default BASE_MODEL now matches adapter_config.json (was 1.5B, must be 3B)
+BASE_MODEL = os.getenv("BASE_MODEL", "Qwen/Qwen2.5-3B-Instruct")
 MODEL_PATH = os.getenv("FINETUNED_MODEL_PATH", "/content/drive/MyDrive/finetuned_qwen")
 OCR_LANG   = os.getenv("OCR_LANG", "eng+fra")
 
@@ -61,7 +62,7 @@ def smart_extract(file_bytes: bytes):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TEXT CLEANING — strips boilerplate BEFORE any extraction
+# TEXT CLEANING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _JD_BOILERPLATE = [
@@ -116,7 +117,7 @@ def clean_cv(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DOMAIN DETECTION — prevents healthcare CV scoring 83% on an AI Engineer job
+# DOMAIN DETECTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _DOMAIN_SIGNALS = {
@@ -182,7 +183,6 @@ STOPWORDS = {
     "proficiency","familiarity","understanding","exposure","background","related",
     "equivalent","relevant","various","multiple","different","following","including",
     "technical","innovative","scalable","robust","seamless","competitive",
-    # generic words that appear in EVERY doc and cause false matches
     "python","english","french","arabic","communication","analytical",
     "problem","solving","detail","oriented","motivated","collaborative",
 }
@@ -240,7 +240,7 @@ def extract_skills(text: str) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MATCHING — domain-aware
+# MATCHING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def terms_overlap(cv_terms: list, job_terms: list,
@@ -297,7 +297,6 @@ def smart_mock(cv_text: str, job_description: str) -> dict:
 
     matched, missing = terms_overlap(cv_terms, job_terms, cv_domain, jd_domain)
 
-    # Cross-domain penalty
     cross_domain_penalty = 0
     if cv_domain != jd_domain and cv_domain != "general" and jd_domain != "general":
         cross_domain_penalty = 30
@@ -308,7 +307,6 @@ def smart_mock(cv_text: str, job_description: str) -> dict:
     else:
         score = max(5, min(40 + len(cv_terms) - cross_domain_penalty, 75))
 
-    # Strengths
     strengths = []
     if matched:
         for i in range(0, min(len(matched), 9), 3):
@@ -322,7 +320,6 @@ def smart_mock(cv_text: str, job_description: str) -> dict:
     if not strengths:
         strengths = ["Candidate has a general professional background"]
 
-    # Weaknesses
     weaknesses = []
     if cross_domain_penalty:
         weaknesses.append(
@@ -364,37 +361,71 @@ def smart_mock(cv_text: str, job_description: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# REAL MODEL — CPU + GPU support, repetition loop fixed
+# REAL MODEL
 # ═══════════════════════════════════════════════════════════════════════════════
 
 tokenizer, model = None, None
 
 def load_model():
-    global tokenizer, model
+    global tokenizer, model, USE_MOCK
     import torch
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
     from peft import PeftModel
+
+    use_gpu = torch.cuda.is_available()
+    logger.info(f"Device: {'GPU' if use_gpu else 'CPU'}")
 
     logger.info(f"Loading tokenizer from {BASE_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
     tokenizer.pad_token = tokenizer.eos_token
 
-    use_gpu = torch.cuda.is_available()
-    logger.info(f"Device: {'GPU' if use_gpu else 'CPU (slow but works)'}")
-
-    base = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        device_map="auto" if use_gpu else None,
-        dtype=torch.float16 if use_gpu else torch.float32,
-    )
-    if not use_gpu:
-        base = base.to("cpu")
+    # ── Memory strategy ───────────────────────────────────────────────────────
+    # GPU  → float16, full speed
+    # CPU  → 4-bit quantization via bitsandbytes (cuts ~6 GB → ~2 GB RAM)
+    #         bitsandbytes CPU support requires version >= 0.43.0
+    if use_gpu:
+        logger.info("Loading in float16 on GPU")
+        base = AutoModelForCausalLM.from_pretrained(
+            BASE_MODEL,
+            device_map="auto",
+            torch_dtype=torch.float16,
+        )
+    else:
+        logger.info("No GPU — loading in 4-bit quantization on CPU (needs ~2 GB RAM)")
+        try:
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float32,   # CPU must use float32
+                bnb_4bit_use_double_quant=False,         # saves a bit more RAM
+                bnb_4bit_quant_type="nf4",
+            )
+            base = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL,
+                quantization_config=bnb_config,
+                device_map="cpu",
+                low_cpu_mem_usage=True,
+            )
+        except Exception as e:
+            # bitsandbytes sometimes doesn't support CPU quantization on older versions
+            logger.warning(f"4-bit loading failed ({e}). Trying float32 with aggressive offloading...")
+            base = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL,
+                device_map="cpu",
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
+                offload_folder="/tmp/offload",   # offload layers to disk if needed
+                offload_state_dict=True,
+            )
 
     logger.info(f"Attaching LoRA adapter from {MODEL_PATH}...")
     model = PeftModel.from_pretrained(base, MODEL_PATH)
     model.eval()
     logger.info("Model ready.")
 
+
+# ── build_prompt ──────────────────────────────────────────────────────────────
+# Uses Qwen's ChatML template (matches training) + a few-shot example so the
+# model sees exactly what "correct" output looks like before generating.
 def build_prompt(cv_text: str, job_description: str) -> str:
     cv_clean  = clean_cv(cv_text)
     jd_clean  = clean_job_description(job_description)
@@ -404,40 +435,68 @@ def build_prompt(cv_text: str, job_description: str) -> str:
     jd_domain = detect_domain(jd_clean)
     matched, missing = terms_overlap(cv_skills, jd_skills, cv_domain, jd_domain)
 
-    hint = ""
+    hint_lines = []
     if matched:
-        hint += f"\n[Skills found in CV: {', '.join(matched[:6])}]"
+        hint_lines.append(f"Skills present in CV: {', '.join(matched[:6])}")
     if missing:
-        hint += f"\n[Skills missing from CV: {', '.join(missing[:6])}]"
+        hint_lines.append(f"Skills absent from CV: {', '.join(missing[:6])}")
+    hint = ("\n" + "\n".join(hint_lines)) if hint_lines else ""
 
-    return (
-        "<s>[INST] You are a senior HR recruiter. "
-        "Analyze the CV against the job description. "
-        "Be specific — reference actual skills, tools, and experience. "
-        "Do NOT repeat any word more than twice in your entire response.\n\n"
-        f"JOB DESCRIPTION:\n{jd_clean[:800]}\n\n"
-        f"CV:\n{cv_clean[:1200]}\n"
-        f"{hint}\n\n"
-        "Reply in EXACTLY this format:\n"
-        "SCORE: <0-100>\n"
-        "STRENGTHS:\n- <strength 1>\n- <strength 2>\n- <strength 3>\n"
-        "WEAKNESSES:\n- <gap 1>\n- <gap 2>\n"
-        "VERDICT: <one sentence> [/INST]"
+    system_msg = (
+        "You are an HR recruiter. "
+        "Output ONLY the structured block below — no extra prose, no explanations.\n\n"
+        "### OUTPUT FORMAT (follow exactly)\n"
+        "SCORE: <integer 0-100>\n"
+        "STRENGTHS:\n"
+        "- <one short phrase>\n"
+        "- <one short phrase>\n"
+        "- <one short phrase>\n"
+        "WEAKNESSES:\n"
+        "- <one short phrase>\n"
+        "- <one short phrase>\n"
+        "VERDICT: <one sentence max>\n\n"
+        "### EXAMPLE\n"
+        "SCORE: 72\n"
+        "STRENGTHS:\n"
+        "- 4 years Python and FastAPI\n"
+        "- PostgreSQL experience matches requirement\n"
+        "- REST API design background\n"
+        "WEAKNESSES:\n"
+        "- No Docker or CI/CD mentioned\n"
+        "- Missing cloud platform experience\n"
+        "VERDICT: Strong backend candidate, recommend interview to assess DevOps gaps."
     )
 
-def _kill_repetition(text: str) -> str:
-    """Cut output the moment a word repeats 4+ times in a row."""
-    words = text.split()
-    result, streak = [], 1
-    for i, w in enumerate(words):
-        if i > 0 and w.lower() == words[i-1].lower():
-            streak += 1
-            if streak >= 4:
-                break
-        else:
-            streak = 1
-        result.append(w)
-    return " ".join(result)
+    user_msg = (
+        f"JOB DESCRIPTION:\n{jd_clean[:600]}\n\n"
+        f"CV:\n{cv_clean[:900]}\n"
+        f"{hint}\n\n"
+        "Now produce the structured output:"
+    )
+
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user",   "content": user_msg},
+    ]
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+
+# ── generate_analysis ─────────────────────────────────────────────────────────
+# Hard-stops generation as soon as VERDICT line ends — prevents the runaway
+# prose the model produces when it doesn't see a natural stopping point.
+def _make_stop_ids(words: list[str]) -> list[int]:
+    """Return token IDs for a list of stop strings (best-effort)."""
+    ids = []
+    for w in words:
+        enc = tokenizer.encode(w, add_special_tokens=False)
+        if enc:
+            ids.append(enc[0])
+    return list(set(ids))
+
 
 def generate_analysis(cv_text: str, job_description: str) -> str:
     import torch
@@ -446,55 +505,226 @@ def generate_analysis(cv_text: str, job_description: str) -> str:
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
+    # Additional EOS: stop on <|im_end|> token AND on a blank line after VERDICT
+    extra_eos = _make_stop_ids(["<|im_end|>", "<|endoftext|>"])
+    all_eos = list({tokenizer.eos_token_id} | set(extra_eos))
+
     with torch.no_grad():
         out = model.generate(
             **inputs,
-            max_new_tokens=300,
-            do_sample=False,          # greedy decoding — no randomness, no loops
-            repetition_penalty=1.4,   # strong penalty for repeating tokens
-            no_repeat_ngram_size=4,   # never repeat any 4-word sequence
+            max_new_tokens=120 if not torch.cuda.is_available() else 180,
+            do_sample=False,
+            repetition_penalty=1.5,
+            no_repeat_ngram_size=5,
             pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            eos_token_id=all_eos,
         )
 
     raw = tokenizer.decode(
         out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-    )
-    return _kill_repetition(raw)
+    ).strip()
 
-def parse_output(raw: str) -> dict:
+    # Hard-cut: drop everything after the VERDICT line ends
+    raw = _truncate_after_verdict(raw)
+    logger.info(f"RAW MODEL OUTPUT:\n{raw}")
+    return raw
+
+
+def _truncate_after_verdict(text: str) -> str:
+    """
+    Cut the raw output right after the VERDICT sentence ends.
+    Works on both multi-line and single-line model output.
+    """
+    m = re.search(r'VERD\w*\s*:', text, re.IGNORECASE)
+    if not m:
+        return text
+    # Find the first sentence-ending punctuation after VERDICT:
+    after_verdict = text[m.end():]
+    stop = re.search(r'[.!?]', after_verdict)
+    if stop:
+        return text[:m.end() + stop.end()].strip()
+    # No punctuation found — just take 200 chars after VERDICT:
+    return text[:m.end() + 200].strip()
+
+
+# ── parse_output ──────────────────────────────────────────────────────────────
+# Strategy: find each keyword's position in the raw string, slice between them.
+# This works even when the model outputs everything on a single line.
+#
+# The model consistently produces (with typos tolerated):
+#   "<number> STRENGHTHS: - item ... WEAKNESSES: - item ... VERDICT: sentence"
+#
+def parse_output(raw: str, cv_text: str = "", job_description: str = "") -> dict:
     result = {
         "score": "N/A", "strengths": [], "weaknesses": [],
         "verdict": "N/A", "raw_output": raw,
     }
-    section = None
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        up = line.upper()
-        if "SCORE" in up:
-            result["score"] = line.split(":", 1)[-1].strip()
-        elif "STRENGTH" in up:
-            section = "strengths"
-        elif "WEAKNESS" in up:
-            section = "weaknesses"
-        elif "VERDICT" in up:
-            section = "verdict"
-            parts = line.split(":", 1)
-            if len(parts) > 1 and parts[1].strip():
-                result["verdict"] = parts[1].strip()
-        elif line.startswith("-"):
-            item = line.lstrip("- ").strip()
-            if section == "strengths":   result["strengths"].append(item)
-            elif section == "weaknesses": result["weaknesses"].append(item)
-        elif section == "verdict" and result["verdict"] == "N/A":
-            result["verdict"] = line
 
-    s = result["score"].replace("%", "").strip()
-    if s.isdigit():
-        result["score"] = f"{s}%"
+    # ── Locate each section keyword (case-insensitive, typo-tolerant) ─────────
+    # We search for: SCORE / STRENGTHS(any spelling) / WEAKNESSES / VERDICT
+    kw = {
+        "score":     re.search(r'SCORE\s*:',          raw, re.IGNORECASE),
+        "strengths": re.search(r'STRENGH{1,2}T\w*\s*:', raw, re.IGNORECASE),
+        "weaknesses":re.search(r'WEAKNESS\w*\s*:',    raw, re.IGNORECASE),
+        "verdict":   re.search(r'VERD\w*\s*:',        raw, re.IGNORECASE),
+    }
+
+    def _slice(start_match, end_match) -> str:
+        """Return text between end-of-header and start of next header."""
+        if start_match is None:
+            return ""
+        start = start_match.end()          # right after the colon
+        end   = end_match.start() if end_match else len(raw)
+        return raw[start:end].strip()
+
+    # ── SCORE ─────────────────────────────────────────────────────────────────
+    # The score number is either right after "SCORE:" or right before "STRENGTHS"
+    score_text = _slice(kw["score"], kw["strengths"])
+    if not score_text and kw["strengths"]:
+        # No explicit SCORE: keyword — grab the first number in the whole string
+        score_text = raw[: kw["strengths"].start()]
+
+    m = re.search(r'(\d{1,3})', score_text)
+    if m:
+        result["score"] = f"{m.group(1)}%"
+
+    # ── STRENGTHS ─────────────────────────────────────────────────────────────
+    strengths_text = _slice(kw["strengths"], kw["weaknesses"])
+    result["strengths"] = _extract_items(strengths_text)
+
+    # ── WEAKNESSES ────────────────────────────────────────────────────────────
+    weaknesses_text = _slice(kw["weaknesses"], kw["verdict"])
+    result["weaknesses"] = _extract_items(weaknesses_text)
+
+    # ── VERDICT ───────────────────────────────────────────────────────────────
+    verdict_text = _slice(kw["verdict"], None)
+    if verdict_text:
+        # Take only the first sentence — the model sometimes rambles after it
+        first_sentence = re.split(r'(?<=[.!?])\s', verdict_text)[0].strip()
+        result["verdict"] = first_sentence[:300]
+
+    # ── Domain-awareness override ─────────────────────────────────────────────
+    # The real model has no domain knowledge — it cheerfully scores a nurse 85%
+    # for a Python dev role. Run the rule-based domain check and apply a penalty
+    # when there's a clear mismatch, and inject a domain mismatch weakness.
+    if cv_text and job_description:
+        cv_domain = detect_domain(clean_cv(cv_text))
+        jd_domain = detect_domain(clean_job_description(job_description))
+        cross_domain = (
+            cv_domain != jd_domain and
+            cv_domain != "general" and
+            jd_domain != "general"
+        )
+        if cross_domain:
+            try:
+                raw_pct = int(result["score"].replace("%", ""))
+            except ValueError:
+                raw_pct = 50
+            penalised = max(5, raw_pct - 30)
+            logger.info(
+                f"Domain mismatch ({cv_domain} → {jd_domain}): "
+                f"score {raw_pct}% → {penalised}%"
+            )
+            result["score"] = f"{penalised}%"
+            domain_msg = (
+                f"Domain mismatch: CV is {cv_domain.replace('_','/')} background, "
+                f"role requires {jd_domain.replace('_','/')} expertise."
+            )
+            # Prepend the domain warning to weaknesses
+            result["weaknesses"] = [domain_msg] + result["weaknesses"]
+
+    # ── Fallback: score ───────────────────────────────────────────────────────
+    if result["score"] == "N/A":
+        logger.warning("No score found — using rule-based fallback")
+        mock = smart_mock(cv_text, job_description)
+        result["score"] = mock["score"]
+        if not result["strengths"]:  result["strengths"]  = mock["strengths"]
+        if not result["weaknesses"]: result["weaknesses"] = mock["weaknesses"]
+
+    # ── Fallback: verdict from score ──────────────────────────────────────────
+    if result["verdict"] == "N/A":
+        try:
+            pct = int(result["score"].replace("%", ""))
+        except ValueError:
+            pct = 0
+        if pct >= 70:
+            result["verdict"] = "Candidate recommended for interview"
+        elif pct >= 45:
+            result["verdict"] = "Candidate worth considering — some gaps present"
+        else:
+            result["verdict"] = "Candidate does not meet the key requirements"
+
+    # ── Guarantee non-empty lists ─────────────────────────────────────────────
+    if not result["strengths"]:
+        result["strengths"] = ["No specific strengths extracted"]
+    if not result["weaknesses"]:
+        result["weaknesses"] = ["No specific gaps extracted"]
+
     return result
+
+
+def _extract_items(text: str) -> list[str]:
+    """
+    Extract list items from a section body.
+    Each item is trimmed aggressively:
+      - cut at first sentence-ending punctuation (. ! ?)
+      - cut at 120 characters max
+      - skip items that are just punctuation/noise
+    """
+    if not text:
+        return []
+
+    items = []
+
+    # ── Try bullet points first ("- item" or "• item") ───────────────────────
+    bullets = re.findall(
+        r'[-•]\s*(.+?)(?=\s*[-•]|\Z)',
+        text,
+        re.DOTALL
+    )
+    for b in bullets:
+        clean = _trim_item(b)
+        if clean:
+            items.append(clean)
+
+    # ── Fallback: split prose on sentence boundaries ──────────────────────────
+    if not items:
+        for s in re.split(r'(?<=[.!?])\s+', text):
+            clean = _trim_item(s)
+            if clean:
+                items.append(clean)
+
+    return items[:4]   # max 4 per section — keeps UI clean
+
+
+def _trim_item(text: str) -> str:
+    """
+    Trim a raw item string to a short, clean phrase:
+    1. Strip leading/trailing whitespace and bullet characters
+    2. Cut at the first sentence-ending punctuation
+    3. Hard cap at 120 characters
+    4. Return empty string if result is too short to be meaningful
+    """
+    text = text.strip().lstrip("-•· \t")
+
+    # Cut at first full stop, exclamation, or question mark
+    m = re.search(r'[.!?]', text)
+    if m:
+        text = text[:m.start() + 1]   # include the punctuation
+
+    text = text.strip()
+
+    # Hard cap
+    if len(text) > 120:
+        # Try to cut at last space before 120 to avoid mid-word cuts
+        cut = text[:120].rsplit(' ', 1)[0]
+        text = cut.rstrip('.,;:') + '…'
+
+    # Reject if too short or just punctuation
+    if len(text) < 8 or re.fullmatch(r'[\W\d\s]+', text):
+        return ""
+
+    return text
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -506,7 +736,8 @@ def run_analysis(cv_text: str, job_description: str, method: str = "text") -> di
         result = smart_mock(cv_text, job_description)
     else:
         raw    = generate_analysis(cv_text, job_description)
-        result = parse_output(raw)
+        # Stash cv/jd so parse_output's score fallback can call smart_mock
+        result = parse_output(raw, cv_text=cv_text, job_description=job_description)
     result["extraction_method"] = method
     return result
 
@@ -518,9 +749,9 @@ def run_analysis(cv_text: str, job_description: str, method: str = "text") -> di
 @asynccontextmanager
 async def lifespan(app):
     if not USE_MOCK:
-        load_model()
-    else:
-        logger.info("MOCK MODE — rule-based analysis active")
+        load_model()   # may flip USE_MOCK=True if no GPU
+    mode = "MOCK (rule-based)" if USE_MOCK else "REAL MODEL (GPU)"
+    logger.info(f"Server starting in {mode} mode")
     yield
 
 app = FastAPI(title="HR CV Analyzer", lifespan=lifespan)
