@@ -40,9 +40,16 @@ def extract_text_pdfplumber(file_bytes: bytes) -> str:
     text = ""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            t = page.extract_text()
+            # extract_text(layout=True) preserves word spacing.
+            # x_tolerance/y_tolerance tune how aggressively chars are merged.
+            t = page.extract_text(layout=True, x_tolerance=3, y_tolerance=3)
+            if not t:
+                # fallback: default extraction
+                t = page.extract_text()
             if t:
                 text += t + "\n"
+    # Collapse runs of 3+ spaces (layout mode can leave wide gaps) to single space
+    text = re.sub(r' {3,}', ' ', text)
     return text.strip()
 
 def smart_extract(file_bytes: bytes):
@@ -560,53 +567,57 @@ def parse_output(raw: str, cv_text: str = "", job_description: str = "") -> dict
         "verdict": "N/A", "raw_output": raw,
     }
 
-    # ── Locate each section keyword (case-insensitive, typo-tolerant) ─────────
-    # We search for: SCORE / STRENGTHS(any spelling) / WEAKNESSES / VERDICT
+    # ── Step 0: collapse newlines so everything is one searchable string ──────
+    # The model sometimes wraps mid-bullet onto the next line. Joining with a
+    # space lets the keyword search and bullet splitter work on a flat string.
+    flat = " ".join(raw.split())   # collapse ALL whitespace to single spaces
+
+    # ── Locate each section keyword ───────────────────────────────────────────
+    # Patterns are intentionally loose to absorb typos:
+    #   STRENGHTHS / STRENGTHS / STRENGHTS  →  STREN\w+\s*:
+    #   WEAKNESSES / WEAKERESONS / WEAKERES:S / WEAKERSS  →  WEAK\w*\s*:
+    #   VERDICT / VEREDICIT / VERNEDICIT     →  VER\w*\s*:
     kw = {
-        "score":     re.search(r'SCORE\s*:',          raw, re.IGNORECASE),
-        "strengths": re.search(r'STRENGH{1,2}T\w*\s*:', raw, re.IGNORECASE),
-        "weaknesses":re.search(r'WEAKNESS\w*\s*:',    raw, re.IGNORECASE),
-        "verdict":   re.search(r'VERD\w*\s*:',        raw, re.IGNORECASE),
+        "score":      re.search(r'SCORE\s*:',   flat, re.IGNORECASE),
+        "strengths":  re.search(r'STREN\w+\s*:', flat, re.IGNORECASE),
+        "weaknesses": re.search(r'WEAK\w*\s*:',  flat, re.IGNORECASE),
+        "verdict":    re.search(r'VER[EI]\w*\s*:|VERDICT\s*:', flat, re.IGNORECASE),
     }
 
-    def _slice(start_match, end_match) -> str:
-        """Return text between end-of-header and start of next header."""
-        if start_match is None:
+    logger.info(f"Section positions — "
+                f"score:{kw['score'] and kw['score'].start()} "
+                f"strengths:{kw['strengths'] and kw['strengths'].start()} "
+                f"weaknesses:{kw['weaknesses'] and kw['weaknesses'].start()} "
+                f"verdict:{kw['verdict'] and kw['verdict'].start()}")
+
+    def _slice(start_m, end_m) -> str:
+        if start_m is None:
             return ""
-        start = start_match.end()          # right after the colon
-        end   = end_match.start() if end_match else len(raw)
-        return raw[start:end].strip()
+        start = start_m.end()
+        end   = end_m.start() if end_m else len(flat)
+        return flat[start:end].strip()
 
     # ── SCORE ─────────────────────────────────────────────────────────────────
-    # The score number is either right after "SCORE:" or right before "STRENGTHS"
     score_text = _slice(kw["score"], kw["strengths"])
     if not score_text and kw["strengths"]:
-        # No explicit SCORE: keyword — grab the first number in the whole string
-        score_text = raw[: kw["strengths"].start()]
-
+        score_text = flat[: kw["strengths"].start()]
     m = re.search(r'(\d{1,3})', score_text)
     if m:
         result["score"] = f"{m.group(1)}%"
 
     # ── STRENGTHS ─────────────────────────────────────────────────────────────
-    strengths_text = _slice(kw["strengths"], kw["weaknesses"])
-    result["strengths"] = _extract_items(strengths_text)
+    result["strengths"] = _extract_items(_slice(kw["strengths"], kw["weaknesses"]))
 
     # ── WEAKNESSES ────────────────────────────────────────────────────────────
-    weaknesses_text = _slice(kw["weaknesses"], kw["verdict"])
-    result["weaknesses"] = _extract_items(weaknesses_text)
+    result["weaknesses"] = _extract_items(_slice(kw["weaknesses"], kw["verdict"]))
 
     # ── VERDICT ───────────────────────────────────────────────────────────────
     verdict_text = _slice(kw["verdict"], None)
     if verdict_text:
-        # Take only the first sentence — the model sometimes rambles after it
-        first_sentence = re.split(r'(?<=[.!?])\s', verdict_text)[0].strip()
-        result["verdict"] = first_sentence[:300]
+        first = re.split(r'(?<=[.!?])\s', verdict_text)[0].strip()
+        result["verdict"] = first[:250]
 
     # ── Domain-awareness override ─────────────────────────────────────────────
-    # The real model has no domain knowledge — it cheerfully scores a nurse 85%
-    # for a Python dev role. Run the rule-based domain check and apply a penalty
-    # when there's a clear mismatch, and inject a domain mismatch weakness.
     if cv_text and job_description:
         cv_domain = detect_domain(clean_cv(cv_text))
         jd_domain = detect_domain(clean_job_description(job_description))
@@ -621,27 +632,23 @@ def parse_output(raw: str, cv_text: str = "", job_description: str = "") -> dict
             except ValueError:
                 raw_pct = 50
             penalised = max(5, raw_pct - 30)
-            logger.info(
-                f"Domain mismatch ({cv_domain} → {jd_domain}): "
-                f"score {raw_pct}% → {penalised}%"
-            )
+            logger.info(f"Domain mismatch ({cv_domain}→{jd_domain}): {raw_pct}%→{penalised}%")
             result["score"] = f"{penalised}%"
             domain_msg = (
                 f"Domain mismatch: CV is {cv_domain.replace('_','/')} background, "
                 f"role requires {jd_domain.replace('_','/')} expertise."
             )
-            # Prepend the domain warning to weaknesses
             result["weaknesses"] = [domain_msg] + result["weaknesses"]
 
-    # ── Fallback: score ───────────────────────────────────────────────────────
+    # ── Score fallback ────────────────────────────────────────────────────────
     if result["score"] == "N/A":
-        logger.warning("No score found — using rule-based fallback")
+        logger.warning("No score — using rule-based fallback")
         mock = smart_mock(cv_text, job_description)
         result["score"] = mock["score"]
         if not result["strengths"]:  result["strengths"]  = mock["strengths"]
         if not result["weaknesses"]: result["weaknesses"] = mock["weaknesses"]
 
-    # ── Fallback: verdict from score ──────────────────────────────────────────
+    # ── Verdict fallback ──────────────────────────────────────────────────────
     if result["verdict"] == "N/A":
         try:
             pct = int(result["score"].replace("%", ""))
@@ -664,37 +671,31 @@ def parse_output(raw: str, cv_text: str = "", job_description: str = "") -> dict
 
 
 def _extract_items(text: str) -> list[str]:
-    """
-    Extract list items from a section body.
-    Each item is trimmed aggressively:
-      - cut at first sentence-ending punctuation (. ! ?)
-      - cut at 120 characters max
-      - skip items that are just punctuation/noise
-    """
     if not text:
         return []
 
     items = []
 
-    # ── Try bullet points first ("- item" or "• item") ───────────────────────
-    bullets = re.findall(
-        r'[-•]\s*(.+?)(?=\s*[-•]|\Z)',
-        text,
-        re.DOTALL
-    )
-    for b in bullets:
-        clean = _trim_item(b)
+    # On a flat (newline-collapsed) string, bullets appear as:
+    #   "- item one - item two - item three"
+    # Split on " - " or " • " preceded by at least one word character
+    parts = re.split(r'(?<=\w)\s+[-•]\s+', text)
+
+    # The first part may or may not start with a dash — strip it
+    parts = [re.sub(r'^[-•]\s*', '', p).strip() for p in parts]
+
+    for p in parts:
+        clean = _trim_item(p)
         if clean:
             items.append(clean)
 
-    # ── Fallback: split prose on sentence boundaries ──────────────────────────
+    # Fallback: no bullet separators found — treat whole text as one item
     if not items:
-        for s in re.split(r'(?<=[.!?])\s+', text):
-            clean = _trim_item(s)
-            if clean:
-                items.append(clean)
+        clean = _trim_item(text)
+        if clean:
+            items.append(clean)
 
-    return items[:4]   # max 4 per section — keeps UI clean
+    return items[:4]
 
 
 def _trim_item(text: str) -> str:
