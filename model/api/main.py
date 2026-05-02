@@ -782,7 +782,102 @@ def root():
 def health():
     return {"status": "ok", "mode": "mock" if USE_MOCK else "real"}
 
-@app.post("/analyze", response_model=AnalyzeResponse)
+class ChatRequest(BaseModel):
+    question: str
+    analysis: dict   # the full analysis result from /analyze
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    """Answer a free-form HR question about a candidate using the analysis context."""
+    a = req.analysis
+    score_int = int(str(a.get("score", "0")).replace("%", "") or 0)
+
+    context = (
+        f"CV Analysis:\n"
+        f"Score: {a.get('score', 'N/A')}\n"
+        f"Verdict: {a.get('verdict', 'N/A')}\n"
+        f"Strengths: {'; '.join(a.get('strengths', []))}\n"
+        f"Weaknesses: {'; '.join(a.get('weaknesses', []))}\n"
+        f"Raw model output: {str(a.get('raw_output', ''))[:600]}\n\n"
+        f"HR Question: {req.question}"
+    )
+
+    if USE_MOCK:
+        # Rule-based answers for mock mode — much richer than the frontend version
+        q = req.question.lower()
+        strengths = a.get("strengths", [])
+        weaknesses = a.get("weaknesses", [])
+
+        if any(w in q for w in ["strength", "good", "qualif", "bring", "has", "match"]):
+            bullets = "\n".join(f"• {s}" for s in strengths) if strengths else "No specific strengths identified."
+            return {"answer": f"Here is what the candidate brings to the role:\n\n{bullets}"}
+
+        elif any(w in q for w in ["weak", "miss", "lack", "gap", "improv", "need"]):
+            bullets = "\n".join(f"• {w}" for w in weaknesses) if weaknesses else "No significant gaps identified."
+            return {"answer": f"Key gaps and areas for improvement:\n\n{bullets}"}
+
+        elif any(w in q for w in ["hire", "interview", "invite", "recommend", "should we", "suitable"]):
+            if score_int >= 70:
+                rec = "Yes — recommend for interview."
+                detail = f"Score of {a.get('score')} indicates strong alignment.\n\nTop reasons:\n" + "\n".join(f"• {s}" for s in strengths[:3])
+            elif score_int >= 45:
+                rec = "Conditional — consider a screening call first."
+                detail = f"Score of {a.get('score')} shows partial fit.\n\nKey gaps to probe:\n" + "\n".join(f"• {w}" for w in weaknesses[:3])
+            else:
+                rec = "No — candidate does not meet core requirements."
+                detail = f"Score of {a.get('score')} indicates significant gaps:\n" + "\n".join(f"• {w}" for w in weaknesses[:3])
+            return {"answer": f"{rec}\n\n{detail}"}
+
+        elif any(w in q for w in ["next", "step", "action", "now", "do", "plan"]):
+            if score_int >= 70:
+                steps = "1. Schedule a technical interview\n2. Prepare questions around: " + ", ".join(strengths[:2]) + "\n3. Check references"
+            elif score_int >= 45:
+                steps = "1. Schedule a 30-min screening call\n2. Ask candidate to address:\n" + "\n".join(f"   • {w}" for w in weaknesses[:2]) + "\n3. Reassess after call"
+            else:
+                steps = "1. Send a polite rejection\n2. Keep CV on file for future roles\n3. Key unmet requirements:\n" + "\n".join(f"   • {w}" for w in weaknesses[:2])
+            return {"answer": f"Recommended next steps:\n\n{steps}"}
+
+        elif any(w in q for w in ["score", "percent", "rate", "mark"]):
+            return {"answer": f"The candidate scored {a.get('score')}.\n\n{a.get('verdict', '')}"}
+
+        else:
+            # Generic: summarise the full picture
+            s_bullets = "\n".join(f"• {s}" for s in strengths)
+            w_bullets = "\n".join(f"• {w}" for w in weaknesses)
+            return {"answer": f"Overall assessment — Score: {a.get('score')}\n{a.get('verdict', '')}\n\nStrengths:\n{s_bullets}\n\nGaps:\n{w_bullets}"}
+    else:
+        # Real model — ask a focused single-turn question
+        if tokenizer is None or model is None:
+            return {"answer": "Model not loaded."}
+        import torch
+        system = (
+            "You are an expert HR assistant. You have analysed a candidate's CV. "
+            "Answer the recruiter's question in 3-5 sentences max. Be specific and direct."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": context},
+        ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=120,
+                do_sample=False,
+                repetition_penalty=1.4,
+                no_repeat_ngram_size=4,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        answer = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+        # Cut at first double-newline or after 3 sentences
+        sentences = re.split(r'(?<=[.!?])\s+', answer)
+        answer = " ".join(sentences[:4]).strip()
+        return {"answer": answer or "I could not generate an answer for this question."}
 def analyze_text(req: AnalyzeRequest):
     if not req.cv_text.strip():       raise HTTPException(400, "cv_text is empty")
     if not req.job_description.strip(): raise HTTPException(400, "job_description is empty")
