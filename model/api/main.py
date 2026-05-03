@@ -765,91 +765,102 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"], expose_headers=["*"],
 )
 
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
 class ChatRequest(BaseModel):
     question: str
     analysis: dict
+    cv_text: str = ""
+    job_description: str = ""
+    history: list[ChatMessage] = []
 
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    """Answer a free-form HR question about a candidate using the analysis context."""
-    a = req.analysis
+    a         = req.analysis
     score_int = int(str(a.get("score", "0")).replace("%", "") or 0)
+    strengths  = a.get("strengths", [])
+    weaknesses = a.get("weaknesses", [])
 
-    context = (
-        f"CV Analysis:\n"
-        f"Score: {a.get('score', 'N/A')}\n"
-        f"Verdict: {a.get('verdict', 'N/A')}\n"
-        f"Strengths: {'; '.join(a.get('strengths', []))}\n"
-        f"Weaknesses: {'; '.join(a.get('weaknesses', []))}\n"
-        f"Raw model output: {str(a.get('raw_output', ''))[:600]}\n\n"
-        f"HR Question: {req.question}"
-    )
+    cv_snippet = req.cv_text[:1200].strip() if req.cv_text else ""
+    jd_snippet = req.job_description[:600].strip() if req.job_description else ""
+    context_parts = [
+        f"Score: {a.get('score','N/A')}",
+        f"Verdict: {a.get('verdict','N/A')}",
+        f"Strengths: {'; '.join(strengths) or 'none'}",
+        f"Weaknesses: {'; '.join(weaknesses) or 'none'}",
+    ]
+    if cv_snippet:
+        context_parts.append(f"\nFull CV:\n{cv_snippet}")
+    if jd_snippet:
+        context_parts.append(f"\nJob description:\n{jd_snippet}")
+    context_block = "\n".join(context_parts)
 
     if USE_MOCK:
-        # Rule-based answers for mock mode — much richer than the frontend version
         q = req.question.lower()
-        strengths = a.get("strengths", [])
-        weaknesses = a.get("weaknesses", [])
+        last_bot = next((m.content for m in reversed(req.history) if m.role == "assistant"), "")
 
-        if any(w in q for w in ["strength", "good", "qualif", "bring", "has", "match"]):
-            bullets = "\n".join(f"• {s}" for s in strengths) if strengths else "No specific strengths identified."
+        if any(w in q for w in ["strength","good","qualif","bring","excel","match"]):
+            bullets = "\n".join(f"• {s}" for s in strengths) or "No specific strengths identified."
             return {"answer": f"Here is what the candidate brings to the role:\n\n{bullets}"}
-
-        elif any(w in q for w in ["weak", "miss", "lack", "gap", "improv", "need"]):
-            bullets = "\n".join(f"• {w}" for w in weaknesses) if weaknesses else "No significant gaps identified."
+        elif any(w in q for w in ["weak","miss","lack","gap","improv","need","without"]):
+            bullets = "\n".join(f"• {w}" for w in weaknesses) or "No significant gaps identified."
             return {"answer": f"Key gaps and areas for improvement:\n\n{bullets}"}
-
-        elif any(w in q for w in ["hire", "interview", "invite", "recommend", "should we", "suitable"]):
+        elif any(w in q for w in ["hire","interview","invite","recommend","should","suitable"]):
             if score_int >= 70:
-                rec = "Yes — recommend for interview."
-                detail = f"Score of {a.get('score')} indicates strong alignment.\n\nTop reasons:\n" + "\n".join(f"• {s}" for s in strengths[:3])
+                rec    = "✅ Yes — recommend for interview."
+                detail = f"Score {a.get('score')} shows strong alignment.\n\nKey reasons:\n" + "\n".join(f"• {s}" for s in strengths[:3])
             elif score_int >= 45:
-                rec = "Conditional — consider a screening call first."
-                detail = f"Score of {a.get('score')} shows partial fit.\n\nKey gaps to probe:\n" + "\n".join(f"• {w}" for w in weaknesses[:3])
+                rec    = "⚠️ Conditional — screening call first."
+                detail = f"Score {a.get('score')} shows partial fit.\n\nProbe these gaps:\n" + "\n".join(f"• {w}" for w in weaknesses[:3])
             else:
-                rec = "No — candidate does not meet core requirements."
-                detail = f"Score of {a.get('score')} indicates significant gaps:\n" + "\n".join(f"• {w}" for w in weaknesses[:3])
+                rec    = "❌ No — does not meet core requirements."
+                detail = "Key unmet requirements:\n" + "\n".join(f"• {w}" for w in weaknesses[:3])
             return {"answer": f"{rec}\n\n{detail}"}
-
-        elif any(w in q for w in ["next", "step", "action", "now", "do", "plan"]):
+        elif any(w in q for w in ["next","step","action","plan","now","do"]):
             if score_int >= 70:
-                steps = "1. Schedule a technical interview\n2. Prepare questions around: " + ", ".join(strengths[:2]) + "\n3. Check references"
+                steps = "1. Schedule a technical interview\n2. Prepare questions around:\n" + "\n".join(f"   • {s}" for s in strengths[:2]) + "\n3. Verify references"
             elif score_int >= 45:
                 steps = "1. Schedule a 30-min screening call\n2. Ask candidate to address:\n" + "\n".join(f"   • {w}" for w in weaknesses[:2]) + "\n3. Reassess after call"
             else:
-                steps = "1. Send a polite rejection\n2. Keep CV on file for future roles\n3. Key unmet requirements:\n" + "\n".join(f"   • {w}" for w in weaknesses[:2])
+                steps = "1. Send polite rejection\n2. Keep CV on file\n3. Unmet requirements:\n" + "\n".join(f"   • {w}" for w in weaknesses[:2])
             return {"answer": f"Recommended next steps:\n\n{steps}"}
-
-        elif any(w in q for w in ["score", "percent", "rate", "mark"]):
-            return {"answer": f"The candidate scored {a.get('score')}.\n\n{a.get('verdict', '')}"}
-
+        elif any(w in q for w in ["score","percent","rate","mark","number"]):
+            return {"answer": f"The candidate scored {a.get('score')}.\n\n{a.get('verdict','')}"}
+        elif any(w in q for w in ["more","elaborate","explain","detail","tell me","expand"]):
+            if last_bot:
+                s_b = "\n".join(f"• {s}" for s in strengths)
+                w_b = "\n".join(f"• {w}" for w in weaknesses)
+                return {"answer": f"To expand:\n\nStrengths:\n{s_b}\n\nGaps:\n{w_b}\n\nVerdict: {a.get('verdict','')}"}
+            return {"answer": f"Score: {a.get('score')}\n{a.get('verdict','')}"}
         else:
-            # Generic: summarise the full picture
-            s_bullets = "\n".join(f"• {s}" for s in strengths)
-            w_bullets = "\n".join(f"• {w}" for w in weaknesses)
-            return {"answer": f"Overall assessment — Score: {a.get('score')}\n{a.get('verdict', '')}\n\nStrengths:\n{s_bullets}\n\nGaps:\n{w_bullets}"}
+            s_b = "\n".join(f"• {s}" for s in strengths)
+            w_b = "\n".join(f"• {w}" for w in weaknesses)
+            return {"answer": f"Overall — Score: {a.get('score')}\n{a.get('verdict','')}\n\nStrengths:\n{s_b}\n\nGaps:\n{w_b}"}
     else:
-        # Real model — ask a focused single-turn question
         if tokenizer is None or model is None:
             return {"answer": "Model not loaded."}
         import torch
         system = (
-            "You are an expert HR assistant. You have analysed a candidate's CV. "
-            "Answer the recruiter's question in 3-5 sentences max. Be specific and direct."
+            "You are an expert HR assistant. Candidate analysis:\n\n"
+            f"{context_block}\n\n"
+            "Answer in 3-5 sentences. Be specific. Do not repeat yourself."
         )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": context},
-        ]
+        messages = [{"role": "system", "content": system}]
+        for m in req.history[-6:]:
+            messages.append({"role": m.role, "content": m.content})
+        messages.append({"role": "user", "content": req.question})
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1800)
         device = next(model.parameters()).device
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             out = model.generate(
                 **inputs,
-                max_new_tokens=120,
+                max_new_tokens=150,
                 do_sample=False,
                 repetition_penalty=1.4,
                 no_repeat_ngram_size=4,
@@ -857,10 +868,8 @@ def chat(req: ChatRequest):
                 eos_token_id=tokenizer.eos_token_id,
             )
         answer = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-        # Cut at first double-newline or after 3 sentences
         sentences = re.split(r'(?<=[.!?])\s+', answer)
-        answer = " ".join(sentences[:4]).strip()
-        return {"answer": answer or "I could not generate an answer for this question."}
+        return {"answer": " ".join(sentences[:5]).strip() or "I could not generate an answer."}
 
 
 @app.get("/ui", response_class=HTMLResponse)
@@ -870,10 +879,18 @@ def serve_ui():
         raise HTTPException(404, "index.html not found at /content/index.html")
     with open(p, "r", encoding="utf-8") as f:
         html = f.read()
-
-    # ── Patch sendChat to call /chat instead of the old /analyze fallback ─────
-    # This runs every request so no separate file or cell is needed.
     import re as _re
+
+    # Patch state variables — add chatHistory, lastCvText
+    html = _re.sub(
+        r'let lastAnalysis\s*=\s*null;.*?let lastJob\s*=\s*"";',
+        'let lastAnalysis = null;\n  let lastCvText = "";\n  let lastJob = "";\n  let chatHistory = [];',
+        html, flags=_re.DOTALL
+    )
+    html = html.replace('lastAnalysis = data;',
+                        'lastAnalysis = data;\n      chatHistory = [];')
+    html = html.replace('lastJob = job;',
+                        'lastJob = job;\n      lastCvText = data.raw_output || "";')
 
     NEW_SEND_CHAT = """  async function sendChat() {
     const input = document.getElementById("chat-input");
@@ -881,24 +898,47 @@ def serve_ui():
     if (!q || !lastAnalysis) return;
     input.value = "";
     appendUserMsg(q);
+    // B — social replies handled locally
+    const SOCIAL = [
+      [/^(thanks?|thank\\s*you|thx|ty|merci)[\\s!.]*$/i, "You're welcome! Feel free to ask anything else about this candidate."],
+      [/^(hi|hello|hey|bonjour)[\\s!.]*$/i,              "Hello! Ask me anything about this candidate."],
+      [/^(ok|okay|got\\s*it|understood|great|nice|cool|perfect)[\\s!.]*$/i, "Got it. What else would you like to know?"],
+      [/^(bye|goodbye|see\\s*ya)[\\s!.]*$/i,             "Goodbye! Come back anytime."],
+    ];
+    for (const [pat, reply] of SOCIAL) {
+      if (pat.test(q)) {
+        appendBotText(reply);
+        chatHistory.push({role:"user", content:q});
+        chatHistory.push({role:"assistant", content:reply});
+        return;
+      }
+    }
     showTyping();
     try {
       const res = await fetch("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q, analysis: lastAnalysis })
+        body: JSON.stringify({
+          question:        q,
+          analysis:        lastAnalysis,
+          cv_text:         lastCvText,
+          job_description: lastJob,
+          history:         chatHistory.slice(-6)
+        })
       });
       removeTyping();
       if (!res.ok) throw new Error("HTTP " + res.status);
       const data = await res.json();
-      appendBotText(data.answer || "No answer returned.");
+      const answer = data.answer || "No answer returned.";
+      appendBotText(answer);
+      chatHistory.push({role:"user",      content:q});
+      chatHistory.push({role:"assistant", content:answer});
     } catch(e) {
       removeTyping();
-      appendBotText("Could not reach the server: " + e.message);
+      appendBotText("Server error: " + e.message);
     }
   }"""
 
-    # Replace the entire sendChat function in the HTML
     patched = _re.sub(
         r'async function sendChat\(\)\s*\{.*?\n  \}',
         NEW_SEND_CHAT,
