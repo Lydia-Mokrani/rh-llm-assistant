@@ -765,26 +765,9 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"], expose_headers=["*"],
 )
 
-@app.get("/ui", response_class=HTMLResponse)
-def serve_ui():
-    p = "/content/index.html"
-    if not os.path.exists(p):
-        raise HTTPException(404, "index.html not found at /content/index.html")
-    with open(p, "r", encoding="utf-8") as f:
-        return f.read()
-
-@app.get("/")
-def root():
-    return {"message": "HR CV Analyzer", "mode": "MOCK" if USE_MOCK else "REAL",
-            "docs": "/docs", "ui": "/ui"}
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "mode": "mock" if USE_MOCK else "real"}
-
 class ChatRequest(BaseModel):
     question: str
-    analysis: dict   # the full analysis result from /analyze
+    analysis: dict
 
 
 @app.post("/chat")
@@ -878,8 +861,65 @@ def chat(req: ChatRequest):
         sentences = re.split(r'(?<=[.!?])\s+', answer)
         answer = " ".join(sentences[:4]).strip()
         return {"answer": answer or "I could not generate an answer for this question."}
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def serve_ui():
+    p = "/content/index.html"
+    if not os.path.exists(p):
+        raise HTTPException(404, "index.html not found at /content/index.html")
+    with open(p, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    # ── Patch sendChat to call /chat instead of the old /analyze fallback ─────
+    # This runs every request so no separate file or cell is needed.
+    import re as _re
+
+    NEW_SEND_CHAT = """  async function sendChat() {
+    const input = document.getElementById("chat-input");
+    const q = input.value.trim();
+    if (!q || !lastAnalysis) return;
+    input.value = "";
+    appendUserMsg(q);
+    showTyping();
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q, analysis: lastAnalysis })
+      });
+      removeTyping();
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      appendBotText(data.answer || "No answer returned.");
+    } catch(e) {
+      removeTyping();
+      appendBotText("Could not reach the server: " + e.message);
+    }
+  }"""
+
+    # Replace the entire sendChat function in the HTML
+    patched = _re.sub(
+        r'async function sendChat\(\)\s*\{.*?\n  \}',
+        NEW_SEND_CHAT,
+        html,
+        flags=_re.DOTALL
+    )
+    return patched
+
+
+@app.get("/")
+def root():
+    return {"message": "HR CV Analyzer", "mode": "MOCK" if USE_MOCK else "REAL",
+            "docs": "/docs", "ui": "/ui"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "mode": "mock" if USE_MOCK else "real"}
+
+@app.post("/analyze", response_model=AnalyzeResponse)
 def analyze_text(req: AnalyzeRequest):
-    if not req.cv_text.strip():       raise HTTPException(400, "cv_text is empty")
+    if not req.cv_text.strip():         raise HTTPException(400, "cv_text is empty")
     if not req.job_description.strip(): raise HTTPException(400, "job_description is empty")
     return AnalyzeResponse(**run_analysis(req.cv_text, req.job_description, "text"))
 
