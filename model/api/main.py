@@ -30,6 +30,7 @@ class AnalyzeResponse(BaseModel):
     verdict: str
     extraction_method: str
     raw_output: str
+    cv_text: str = ""   # returned so the frontend can pass it to /chat
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -742,6 +743,7 @@ def run_analysis(cv_text: str, job_description: str, method: str = "text") -> di
         # Stash cv/jd so parse_output's score fallback can call smart_mock
         result = parse_output(raw, cv_text=cv_text, job_description=job_description)
     result["extraction_method"] = method
+    result["cv_text"] = cv_text[:2000]   # returned to frontend for /chat context
     return result
 
 
@@ -845,9 +847,14 @@ def chat(req: ChatRequest):
             return {"answer": "Model not loaded."}
         import torch
         system = (
-            "You are an expert HR assistant. Candidate analysis:\n\n"
+            "You are an expert HR assistant reviewing a candidate on behalf of a recruiter.\n"
+            "You are talking ABOUT the candidate — never TO them, never ask them questions.\n"
+            "Always refer to the candidate in third person (he/she/they).\n"
+            "Candidate analysis:\n\n"
             f"{context_block}\n\n"
-            "Answer in 3-5 sentences. Be specific. Do not repeat yourself."
+            "Answer the recruiter's question in 3-5 sentences. "
+            "Be specific — reference actual skills and gaps from the analysis. "
+            "Do not repeat yourself. Do not ask follow-up questions."
         )
         messages = [{"role": "system", "content": system}]
         for m in req.history[-6:]:
@@ -890,7 +897,7 @@ def serve_ui():
     html = html.replace('lastAnalysis = data;',
                         'lastAnalysis = data;\n      chatHistory = [];')
     html = html.replace('lastJob = job;',
-                        'lastJob = job;\n      lastCvText = data.raw_output || "";')
+                        'lastJob = job;\n      lastCvText = data.cv_text || data.raw_output || "";')
 
     NEW_SEND_CHAT = """  async function sendChat() {
     const input = document.getElementById("chat-input");
@@ -898,12 +905,25 @@ def serve_ui():
     if (!q || !lastAnalysis) return;
     input.value = "";
     appendUserMsg(q);
-    // B — social replies handled locally
+
+    // B — social/emotional replies handled locally, no server call
+    // Patterns are loose to catch abbreviations (thank u, thx, ur great etc.)
     const SOCIAL = [
-      [/^(thanks?|thank\\s*you|thx|ty|merci)[\\s!.]*$/i, "You're welcome! Feel free to ask anything else about this candidate."],
-      [/^(hi|hello|hey|bonjour)[\\s!.]*$/i,              "Hello! Ask me anything about this candidate."],
-      [/^(ok|okay|got\\s*it|understood|great|nice|cool|perfect)[\\s!.]*$/i, "Got it. What else would you like to know?"],
-      [/^(bye|goodbye|see\\s*ya)[\\s!.]*$/i,             "Goodbye! Come back anytime."],
+      // gratitude — "thank u", "thanks!", "thx", "merci", "شكرا"
+      [/thank|thx|ty\b|merci|شكرا|appreciate/i,
+       "You're welcome! Feel free to ask anything else about this candidate."],
+      // praise for the candidate — "he is a gem", "amazing", "perfect candidate"
+      [/\b(gem|amazing|perfect|fantastic|great candidate|excellent candidate|brilliant)\b/i,
+       "Glad the analysis is helpful! Let me know if you need more details or want to compare with other candidates."],
+      // greetings
+      [/^(hi|hello|hey|bonjour|سلام|مرحبا)[\s!.]*$/i,
+       "Hello! Ask me anything about this candidate."],
+      // acknowledgements — "ok", "got it", "understood", "cool"
+      [/^(ok|okay|got\s*it|understood|sure|alright|perfect|great|nice|cool|wow|noted)[\s!.]*$/i,
+       "Got it. What else would you like to know?"],
+      // farewells
+      [/^(bye|goodbye|see\s*ya|ciao|au\s*revoir|وداعا)[\s!.]*$/i,
+       "Goodbye! Come back anytime."],
     ];
     for (const [pat, reply] of SOCIAL) {
       if (pat.test(q)) {
